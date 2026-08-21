@@ -1,0 +1,56 @@
+[project]
+name = "ilumina-streamlit"
+version = "3.0.0"
+description = "Streamlit inventory management system for Ilumina Mi Vida"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "streamlit>=1.30.0",
+    "pandas>=1.5.0",
+    "xlsxwriter>=3.0.0",
+    "pillow>=9.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Linting and Formatting via Ruff
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "I", "N", "UP", "B", "A", "C4", "RET", "SIM", "ARG", "PTH", "RUF"
+]
+ignore = ["E501", "RUF002", "RUF001", "RUF003", "ARG002", "SIM117", "SIM102"]
+
+# Type Checking via Mypy
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = false
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+ignore_missing_imports = true
+explicit_package_bases = true
+
+# Type Checking via Pyright
+[tool.pyright]
+include = ["src", "app.py"]
+exclude = [
+    "src/services/export_service.py",
+    "**/.venv",
+    "**/__pycache__"
+]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+
+[tool.uv]
+package = false

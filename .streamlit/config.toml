@@ -1,0 +1,12 @@
+[theme]
+primaryColor = "#e68a2e"
+backgroundColor = "#faf0e6"
+secondaryBackgroundColor = "#f5dcc8"
+textColor = "#3d2b1a"
+borderColor = "#e8c9b0"
+baseRadius = "8px"
+buttonRadius = "8px"
+font = "sans-serif"
+
+[client]
+toolbarMode = "viewer"

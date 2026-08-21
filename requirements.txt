@@ -1,0 +1,6 @@
+streamlit
+pandas
+pillow
+openpyxl
+xlsxwriter
+libsql-experimental
