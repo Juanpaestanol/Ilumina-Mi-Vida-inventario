@@ -6,6 +6,177 @@ import streamlit as st
 DB_PATH = "ilumina.db"
 
 
+class TursoCursorWrapper:
+    """Cursor wrapper que reconecta automáticamente si el stream de Turso caduca
+
+    y convierte parámetros a tuplas para evitar TypeErrors.
+    """
+
+    def __init__(self, conn_wrapper, cursor):
+        self.conn_wrapper = conn_wrapper
+        self._cursor = cursor
+
+    def _is_stream_expired(self, exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return any(
+            err in msg
+            for err in (
+                "stream not found",
+                "stream_not_found",
+                "404",
+                "hrana",
+                "closed",
+                "broken pipe",
+            )
+        )
+
+    def _prepare_args(self, args, kwargs):
+        clean_args = []
+        for a in args:
+            if isinstance(a, list):
+                clean_args.append(tuple(a))
+            else:
+                clean_args.append(a)
+
+        if "params" in kwargs and isinstance(kwargs["params"], list):
+            kwargs["params"] = tuple(kwargs["params"])
+
+        return clean_args, kwargs
+
+    def execute(self, sql, *args, **kwargs):
+        clean_args, clean_kwargs = self._prepare_args(args, kwargs)
+        try:
+            return self._cursor.execute(sql, *clean_args, **clean_kwargs)
+        except Exception as e:
+            if self._is_stream_expired(e):
+                self.conn_wrapper._reconnect()
+                self._cursor = self.conn_wrapper._conn.cursor()
+                return self._cursor.execute(sql, *clean_args, **clean_kwargs)
+            raise e
+
+    def executescript(self, sql):
+        try:
+            return self._cursor.executescript(sql)
+        except Exception as e:
+            if self._is_stream_expired(e):
+                self.conn_wrapper._reconnect()
+                self._cursor = self.conn_wrapper._conn.cursor()
+                return self._cursor.executescript(sql)
+            raise e
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    def fetchmany(self, size=None):
+        return (
+            self._cursor.fetchmany(size) if size else self._cursor.fetchmany()
+        )
+
+    @property
+    def description(self):
+        return self._cursor.description
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    @property
+    def lastrowid(self):
+        return self._cursor.lastrowid
+
+    def close(self):
+        try:
+            self._cursor.close()
+        except Exception:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
+class TursoConnectionWrapper:
+    """Connection wrapper para gestionar reconexiones transparentes con Turso."""
+
+    def __init__(self, db_url, auth_token):
+        self.db_url = db_url
+        self.auth_token = auth_token
+        self._conn = None
+        self._reconnect()
+
+    def _reconnect(self):
+        try:
+            if self._conn:
+                self._conn.close()
+        except Exception:
+            pass
+        self._conn = libsql.connect(
+            database=self.db_url,
+            auth_token=self.auth_token,
+        )
+
+    def _is_stream_expired(self, exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return any(
+            err in msg
+            for err in (
+                "stream not found",
+                "stream_not_found",
+                "404",
+                "hrana",
+                "closed",
+                "broken pipe",
+            )
+        )
+
+    def cursor(self):
+        try:
+            return TursoCursorWrapper(self, self._conn.cursor())
+        except Exception as e:
+            if self._is_stream_expired(e):
+                self._reconnect()
+                return TursoCursorWrapper(self, self._conn.cursor())
+            raise e
+
+    def execute(self, *args, **kwargs):
+        cur = self.cursor()
+        return cur.execute(*args, **kwargs)
+
+    def executescript(self, *args, **kwargs):
+        cur = self.cursor()
+        return cur.executescript(*args, **kwargs)
+
+    def commit(self):
+        try:
+            return self._conn.commit()
+        except Exception as e:
+            if self._is_stream_expired(e):
+                self._reconnect()
+                return self._conn.commit()
+            raise e
+
+    def rollback(self):
+        try:
+            return self._conn.rollback()
+        except Exception as e:
+            if self._is_stream_expired(e):
+                self._reconnect()
+                return self._conn.rollback()
+            raise e
+
+    def close(self):
+        if self._conn:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
 class Database:
     _instance = None
 
@@ -16,7 +187,6 @@ class Database:
         return cls._instance
 
     def _initialize(self):
-        # 1. Detectar credenciales de Turso (Secrets de Streamlit Cloud o variables de entorno)
         turso_url = st.secrets.get(
             "TURSO_DATABASE_URL", os.getenv("TURSO_DATABASE_URL")
         )
@@ -25,17 +195,11 @@ class Database:
         )
 
         if turso_url and turso_token:
-            # Conexión remota a Turso (Producción en la nube)
-            self.conn = libsql.connect(
-                database=turso_url,
-                auth_token=turso_token,
-                check_same_thread=False,
-            )
+            self.conn = TursoConnectionWrapper(turso_url, turso_token)
         else:
-            # Conexión local a archivo SQLite (Desarrollo en máquina local)
             self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+            self.conn.execute("PRAGMA foreign_keys = ON")
 
-        self.conn.execute("PRAGMA foreign_keys = ON")
         self._create_tables()
         self._migrate_schema()
 
@@ -97,14 +261,12 @@ class Database:
 
     def _migrate_schema(self):
         cursor = self.conn.cursor()
-        # Add Deleted to Items if missing
         cursor.execute("PRAGMA table_info(Items)")
         columns = [row[1] for row in cursor.fetchall()]
         if "Deleted" not in columns:
             cursor.execute("ALTER TABLE Items ADD COLUMN Deleted INTEGER DEFAULT 0")
             self.conn.commit()
 
-        # Add Superseded to History if missing
         cursor.execute("PRAGMA table_info(History)")
         columns = [row[1] for row in cursor.fetchall()]
         if "Superseded" not in columns:
@@ -113,7 +275,6 @@ class Database:
             )
             self.conn.commit()
 
-        # Add Deleted to Materials if missing
         cursor.execute("PRAGMA table_info(Materials)")
         columns = [row[1] for row in cursor.fetchall()]
         if "Deleted" not in columns:
@@ -122,7 +283,6 @@ class Database:
             )
             self.conn.commit()
 
-        # Add Deleted to Locations if missing
         cursor.execute("PRAGMA table_info(Locations)")
         columns = [row[1] for row in cursor.fetchall()]
         if "Deleted" not in columns:
@@ -131,7 +291,6 @@ class Database:
             )
             self.conn.commit()
 
-        # Add Ganancias to Items if missing
         cursor.execute("PRAGMA table_info(Items)")
         columns = [row[1] for row in cursor.fetchall()]
         if "Ganancias" not in columns:
@@ -139,13 +298,11 @@ class Database:
                 "ALTER TABLE Items ADD COLUMN Ganancias REAL DEFAULT 0.0"
             )
             self.conn.commit()
-            # Backfill existing items: Ganancias = Price * TotalSold
             cursor.execute(
                 "UPDATE Items SET Ganancias = Price * TotalSold"
             )
             self.conn.commit()
 
-        # Add GananciasDelta to History if missing
         cursor.execute("PRAGMA table_info(History)")
         columns = [row[1] for row in cursor.fetchall()]
         if "GananciasDelta" not in columns:
@@ -154,7 +311,6 @@ class Database:
             )
             self.conn.commit()
 
-        # Add LogHash to History if missing
         cursor.execute("PRAGMA table_info(History)")
         columns = [row[1] for row in cursor.fetchall()]
         if "LogHash" not in columns:
@@ -163,42 +319,34 @@ class Database:
             )
             self.conn.commit()
 
-        # Run taxonomy migration for old history records (idempotent updates)
-        # 1. Materials
         cursor.execute("UPDATE History SET ActionType = 'CREAR', TargetType = 'MATERIAL' WHERE ActionType = 'ADD_MATERIAL'")
         cursor.execute("UPDATE History SET ActionType = 'MODIFICAR', TargetType = 'MATERIAL' WHERE ActionType = 'EDIT_MATERIAL'")
         cursor.execute("UPDATE History SET ActionType = 'ELIMINAR', TargetType = 'MATERIAL' WHERE ActionType = 'DELETE_MATERIAL'")
         cursor.execute("UPDATE History SET ActionType = 'RESTAURAR', TargetType = 'MATERIAL' WHERE ActionType = 'RESTORE_MATERIAL'")
         
-        # 2. Locations
         cursor.execute("UPDATE History SET ActionType = 'CREAR', TargetType = 'LUGAR' WHERE ActionType = 'ADD_LOCATION'")
         cursor.execute("UPDATE History SET ActionType = 'MODIFICAR', TargetType = 'LUGAR' WHERE ActionType = 'EDIT_LOCATION'")
         cursor.execute("UPDATE History SET ActionType = 'ELIMINAR', TargetType = 'LUGAR' WHERE ActionType = 'DELETE_LOCATION'")
         cursor.execute("UPDATE History SET ActionType = 'RESTAURAR', TargetType = 'LUGAR' WHERE ActionType = 'RESTORE_LOCATION'")
         
-        # 3. Items (Pulseras)
         cursor.execute("UPDATE History SET ActionType = 'CREAR', TargetType = 'PULSERA' WHERE ActionType = 'ADD_ITEM'")
         cursor.execute("UPDATE History SET ActionType = 'MODIFICAR', TargetType = 'PULSERA' WHERE ActionType = 'EDIT_ITEM'")
         cursor.execute("UPDATE History SET ActionType = 'ELIMINAR', TargetType = 'PULSERA' WHERE ActionType = 'DELETE_ITEM'")
         cursor.execute("UPDATE History SET ActionType = 'RESTAURAR', TargetType = 'PULSERA' WHERE ActionType = 'RESTORE_ITEM'")
         
-        # 4. Corrections and other events
         cursor.execute("UPDATE History SET ActionType = 'CORREGIR', TargetType = 'TRANSACCION' WHERE ActionType = 'CORRECT_TRANSACTION'")
         cursor.execute("UPDATE History SET ActionType = 'INICIO_SESION', TargetType = 'SEGURIDAD' WHERE ActionType = 'LOGIN'")
         cursor.execute("UPDATE History SET ActionType = 'CIERRE_SESION', TargetType = 'SEGURIDAD' WHERE ActionType = 'LOGOUT'")
         
-        # 5. Core actions for corrected transactions (VENTA_CORRECTED -> VENTA, etc.)
         cursor.execute("UPDATE History SET ActionType = 'VENTA', TargetType = 'PULSERA' WHERE ActionType = 'VENTA_CORRECTED'")
         cursor.execute("UPDATE History SET ActionType = 'RESURTIDO', TargetType = 'PULSERA' WHERE ActionType = 'RESURTIDO_CORRECTED'")
         cursor.execute("UPDATE History SET ActionType = 'REGALO', TargetType = 'PULSERA' WHERE ActionType = 'REGALO_CORRECTED'")
         cursor.execute("UPDATE History SET ActionType = 'PERDIDA', TargetType = 'PULSERA' WHERE ActionType = 'PERDIDA_CORRECTED'")
         cursor.execute("UPDATE History SET ActionType = 'ALTA', TargetType = 'PULSERA' WHERE ActionType = 'ALTA_CORRECTED'")
 
-        # 6. Set TargetType to PULSERA for existing inventory actions
         cursor.execute("UPDATE History SET TargetType = 'PULSERA' WHERE ActionType IN ('VENTA', 'RESURTIDO', 'REGALO', 'PERDIDA', 'ALTA') AND (TargetType IS NULL OR TargetType = 'ITEM')")
         self.conn.commit()
 
-        # 7. Backfill hashes for existing history records if any have NULL hashes
         cursor.execute("SELECT COUNT(*) FROM History WHERE LogHash IS NULL")
         null_count = cursor.fetchone()[0]
         if null_count > 0:
@@ -214,7 +362,6 @@ class Database:
             prev_hash = ""
             for row in rows:
                 r_id, timestamp, user, action_type, target_type, target_id, qty, loc_id, note, old_val, new_val, orig_id, gan_delta = row
-                
                 payload = f"{timestamp}|{user}|{action_type}|{target_type}|{target_id}|" \
                           f"{qty or 0}|{loc_id or ''}|{note or ''}|" \
                           f"{old_val or ''}|{new_val or ''}|" \
@@ -224,7 +371,6 @@ class Database:
                 prev_hash = h
             self.conn.commit()
 
-        # Drop old Transactions table if it exists
         cursor.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='Transactions'"
         )
