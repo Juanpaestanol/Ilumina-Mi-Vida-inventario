@@ -386,7 +386,10 @@ class InventoryService:
                 return True
             params.append(old_id)
             query = f"UPDATE Items SET {', '.join(set_clause)} WHERE Id = ?"
-            cursor.execute(query, params)
+            if params:
+                cursor.execute(query, tuple(params))
+            else:
+                cursor.execute(query)
             self.conn.commit()
 
             old_vals: dict[str, Any] = {}
@@ -472,7 +475,10 @@ class InventoryService:
         if limit:
             query += " LIMIT ?"
             params.append(limit)
-        cursor.execute(query, params)
+        if params:
+            cursor.execute(query, tuple(params))
+        else:
+            cursor.execute(query)
         rows = cursor.fetchall()
         cols = [desc[0] for desc in cursor.description]
         return [dict(zip(cols, row, strict=False)) for row in rows]
