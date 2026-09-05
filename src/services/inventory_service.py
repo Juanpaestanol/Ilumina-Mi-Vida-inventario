@@ -25,6 +25,7 @@ class InventoryService:
         new_values: dict | None = None,
         original_id: int | None = None,
         ganancias_delta: float | None = None,
+        custom_date: str | None = None,
     ):
         cursor = self.conn.cursor()
         
@@ -32,8 +33,13 @@ class InventoryService:
         cursor.execute("SELECT LogHash FROM History ORDER BY Id DESC LIMIT 1")
         last_row = cursor.fetchone()
         prev_hash = last_row[0] if last_row else ""
-        
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+        if custom_date:
+            current_time = datetime.now().strftime("%H:%M:%S")
+            timestamp = f"{custom_date} {current_time}" if len(custom_date) == 10 else custom_date
+        else:
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
         old_val_str = json.dumps(old_values) if old_values else None
         new_val_str = json.dumps(new_values) if new_values else None
         
@@ -344,6 +350,7 @@ class InventoryService:
                     "Stock": item["Stock"],
                     "CreatedDate": item["CreatedDate"],
                 },
+                custom_date=item.get("CreatedDate")
             )
             return True
         except sqlite3.IntegrityError:
@@ -533,6 +540,7 @@ class InventoryService:
             note=note,
             new_values={"Stock": f"±{quantity}"},
             ganancias_delta=ganancias_delta,
+            custom_date=date,
         )
         return True
 
@@ -741,6 +749,8 @@ class InventoryService:
             price_to_use = new_price if "ItemId" in changes else target_price
             corrected_ganancias = corrected_qty * price_to_use
 
+        final_date = new_date if new_date else old_date
+
         self._log_history(
             action_type=corrected_action,
             target_type="PULSERA",
@@ -750,6 +760,7 @@ class InventoryService:
             note=f"Movimiento corregido (original ID {history_id})",
             original_id=history_id,
             ganancias_delta=corrected_ganancias,
+            custom_date=final_date
         )
 
         return True
