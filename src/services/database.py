@@ -1,6 +1,6 @@
 import os
 import sqlite3
-import libsql as libsql
+import libsql
 import streamlit as st
 
 DB_PATH = "ilumina.db"
