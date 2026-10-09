@@ -4,13 +4,28 @@ import io
 import threading
 from datetime import datetime
 import time
-
-def get_session_token(username: str) -> str:
-    secret_salt = "ilumina_mi_vida_secret_salt_2026"
-    return hashlib.sha256(f"{username}:{secret_salt}".encode("utf-8")).hexdigest()
-
+import os
+import hmac
 import pandas as pd
 import streamlit as st
+
+
+def get_secret(name: str) -> str:
+    """Lee un secreto de Streamlit o de variables de entorno."""
+    try:
+        value = st.secrets[name]
+    except Exception:
+        value = os.getenv(name)
+    if not value:
+        st.error(f"Falta configurar el secreto '{name}'.")
+        st.stop()
+    return str(value)
+
+
+def get_session_token(username: str) -> str:
+    secret_salt = get_secret("SESSION_SALT")
+    return hashlib.sha256(f"{username}:{secret_salt}".encode("utf-8")).hexdigest()
+
 
 from src.services.database import Database
 from src.services.export_service import ExportService
@@ -153,7 +168,7 @@ if not st.session_state.logged_in:
             submit = st.form_submit_button("Entrar", width="stretch")
 
             if submit:
-                if password == "Ilumina916" and user:
+                if user and hmac.compare_digest(password.encode("utf-8"), get_secret("APP_PASSWORD").encode("utf-8")):
                     with db_lock:
                         st.session_state.logged_in = True
                         st.session_state.username = user
